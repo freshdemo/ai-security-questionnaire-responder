@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 # Allow overriding spreadsheet and worksheet via environment variables for flexibility
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID', '1pm0m9UKfGNpXq-9df2n09Z8B9IT9J8TsE6Of6lbUGFI')
+SPREADSHEET_ID = os.getenv('SPREADSHEET_ID', '1MgZsL6lVy5Z4-9IQAoLtxS_P7dd6P3C4PxTGGopfg9Y')
 WORKSHEET_INDEX = int(os.getenv('WORKSHEET_INDEX', '0'))
 SERVICE_ACCOUNT_FILE = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', './snyk-cx-se-demo-0ce146967b8c.json')
 DOCS_DIR = './docs'  # Folder containing documents (PDFs, spreadsheets) to provide as context
