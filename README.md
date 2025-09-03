@@ -41,7 +41,7 @@ This tool allows you to upload documents from https://trust.synk.io (or anywhere
        - Move them into a docs/ folder in this project.
 
     7. RUN THE SCRIPT:
-       - Run the script with 'python ./gemini.py' from the project folder.
+       - Run the script with 'python ./security_questionnaire_responder.py' from the project folder.
        - You should see it uploading the documents to Gemini, and then starting to populate the spreadsheet.
 
     8. TUNING:

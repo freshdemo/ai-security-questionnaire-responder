@@ -366,7 +366,7 @@ Using only the provided documents as sources, evaluate this requirement:
 #PROMPTS
 
 - Use only the provided documents; do not use external knowledge.
-- Choose exactly one source. Prefer in this order when multiple match: SOC 2 report > ISO Statement of Applicability > policy/procedure > overview/FAQ.
+- Choose exactly one source. Prefer in this order when multiple match: Snyk SIG 2025 Lite > SOC 2 report > ISO Statement of Applicability > policy/procedure > overview/FAQ.
 - Ground the reasoning in a specific clause/section; be concrete, not generic.
 - Keep the entire response on a single line (no newlines).
 - Keep the reasoning concise (≤ 40 words).
