@@ -37,10 +37,10 @@ This tool allows you to upload source of truth documents (security questionnairr
     5. INSTALL REQUIRED PACKAGES:
        - Create a virtual environment, 'python3 -m venv ai-security-questionnaire-responder-env'
        - Activate it, 'source ai-security-questionnaire-responder-env/bin/activate'
-       - Install requirements ' pip install requirements.txt' or 'pip install gspread google-auth google-generativeai'
+       - Install requirements ' pip install -r requirements.txt' or 'pip install gspread google-auth google-generativeai'
     
     6. DOWNLOAD RELEVANT DOCUMENTS:
-       - Download relevant documents from https://trust.snyk.io. It's best to use the ISO27001, SIG Lite, and SOC2 report. Most of the other ones may generate undesireable responses.
+       - Download relevant compliance documents. It's best to use the ISO27001, SIG Lite, and SOC2 report. Most of the other ones may generate undesireable responses.
        - Move them into a docs/ folder in this project.
 
     7. RUN THE SCRIPT:
