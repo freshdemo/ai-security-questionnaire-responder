@@ -3,6 +3,7 @@ import gspread
 import google.generativeai as genai
 import time
 import os
+import sys
 from google.oauth2.service_account import Credentials
 from pathlib import Path
 import random
@@ -10,15 +11,20 @@ import requests
 import tempfile
 import json
 import hashlib
-from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlunparse
+import re
 from bs4 import BeautifulSoup
 from google.api_core import exceptions as gcloud_exceptions
 from gspread.exceptions import APIError as GSpreadAPIError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Set, List, Optional, Dict, Any
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
-import time
+from typing import Set, List, Optional, Dict, Any, Tuple, NamedTuple
+
+class ProcessedFile(NamedTuple):
+    """Container for processed file information."""
+    path: Path
+    source_url: Optional[str] = None
 
 # Configuration
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -181,58 +187,133 @@ def _chunk_text(text: str, max_chunk_size: int = 4000) -> list[str]:
         
     return chunks
 
-def _get_file_fingerprint(file_path: Path) -> str:
-    """Generate a fingerprint for a file based on its content and metadata."""
-    hasher = hashlib.sha256()
-    # Include file size and modification time in the fingerprint
-    stat = file_path.stat()
-    hasher.update(f"{stat.st_size}:{stat.st_mtime}:".encode())
-    # Include first and last 8KB of file content
-    with open(file_path, 'rb') as f:
-        # Read first 8KB
-        chunk = f.read(8192)
-        hasher.update(chunk)
-        # Read last 8KB if file is larger than 16KB
-        if stat.st_size > 16384:
-            f.seek(-8192, 2)
-            chunk = f.read()
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-def _upload_single_file(p: Path, upload_cache: dict, ext_to_mime: dict):
-    """Helper function to upload a single file with proper error handling."""
-    try:
-        # Get absolute path as string for the cache
-        abs_path = str(p.absolute())
-        file_fingerprint = _get_file_fingerprint(p)
+def _extract_source_url(content: str) -> Optional[str]:
+    """Extract SOURCE_URL comment from markdown content.
+    
+    Args:
+        content: The markdown content to search in
         
-        # Check if we have a cached upload for this exact file
-        cache_key = f"{abs_path}:{file_fingerprint}"
-        if cache_key in upload_cache:
-            print(f"Using cached upload for: {p.name}")
-            return genai.get_file(name=upload_cache[cache_key]), cache_key, None
-            
-        # No cache hit, upload the file
-        print(f"Uploading to Gemini: {p.name}")
-        mime = ext_to_mime.get(p.suffix.lower())
-        if not mime:
-            print(f"  Warning: Unsupported file type: {p.suffix}")
+    Returns:
+        The source URL if found, None otherwise
+    """
+    # Look for <!-- SOURCE_URL: http://example.com --> pattern
+    match = re.search(r'<!--\s*SOURCE_URL\s*:\s*(https?://[^\s>]+)\s*-->', content, re.IGNORECASE)
+    return match.group(1) if match else None
+
+def _get_file_fingerprint(file_path: Path) -> str:
+    """Generate a fingerprint for a file based on its full content."""
+    hasher = hashlib.md5()
+    try:
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(8192):  # Read in 8KB chunks
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except IOError as e:
+        print(f"  ⚠️  Could not read file for fingerprinting: {file_path.name}, {e}")
+        # Return a random hash to ensure it's treated as a new file
+        return hashlib.md5(os.urandom(16)).hexdigest()
+
+def _upload_single_file(p: Path, upload_cache: dict, ext_to_mime: dict, source_url: Optional[str] = None):
+    """Helper function to upload a single file with proper error handling.
+    
+    Args:
+        p: Path to the file to upload
+        upload_cache: Dictionary containing cached uploads
+        ext_to_mime: Mapping of file extensions to MIME types
+        source_url: Optional source URL to use as the display name
+        
+    Returns:
+        Tuple of (uploaded_file, cache_key, display_name) or (None, None, None) on failure
+    """
+    def _log_error(msg: str, error: Optional[Exception] = None):
+        """Helper to log errors consistently"""
+        error_msg = f"  ✗ {msg}"
+        if error:
+            error_msg += f": {str(error)}"
+        print(error_msg)
+    
+    try:
+        # Input validation
+        if not p:
+            _log_error("No file path provided")
             return None, None, None
             
-        f = genai.upload_file(path=str(p), mime_type=mime)
-        print(f"  Uploaded: {f.name}")
-        return f, cache_key, f.name
+        if not p.exists():
+            _log_error(f"File does not exist: {p}")
+            return None, None, None
+            
+        # Get file info
+        abs_path = str(p.absolute())
+        file_size_mb = p.stat().st_size / (1024 * 1024)  # Size in MB
+        file_fingerprint = _get_file_fingerprint(p)
+        display_name = source_url or p.name
+        
+        # Check cache first - use filename and content hash as key
+        cache_key = f"{p.name}:{file_fingerprint}"
+        if cache_key in upload_cache and upload_cache[cache_key]:
+            print(f"  🔍 Found in cache: {display_name}")
+            try:
+                # Get the file from Gemini using the cached file ID
+                file_obj = genai.get_file(name=upload_cache[cache_key])
+                # Double-check the file is still valid
+                if file_obj.state.name == 'ACTIVE':
+                    print(f"  ✓ Using cached version: {file_obj.name}")
+                    return file_obj, cache_key, display_name
+                else:
+                    print(f"  ⚠️ Cached file is {file_obj.state.name}, re-uploading...")
+                    # Remove the invalid cache entry
+                    del upload_cache[cache_key]
+            except Exception as e:
+                _log_error(f"Failed to retrieve cached file {cache_key}", e)
+                # Remove the invalid cache entry
+                if cache_key in upload_cache:
+                    del upload_cache[cache_key]
+        
+        # Check file size (Gemini has upload limits)
+        if file_size_mb > 20:  # 20MB limit for Gemini
+            _log_error(f"File too large ({file_size_mb:.2f}MB > 20MB): {p.name}")
+            return None, None, None
+            
+        # Get MIME type
+        mime = ext_to_mime.get(p.suffix.lower())
+        if not mime:
+            _log_error(f"Unsupported file type: {p.suffix}")
+            return None, None, None
+            
+        # Upload the file
+        print(f"  ⬆️  Uploading: {display_name} ({file_size_mb:.2f}MB)")
+        try:
+            start_time = time.time()
+            f = genai.upload_file(path=str(p), mime_type=mime)
+            upload_time = time.time() - start_time
+            speed_mbps = file_size_mb / upload_time if upload_time > 0 else 0
+            
+            print(f"  ✓ Uploaded in {upload_time:.1f}s ({speed_mbps:.1f} MB/s): {f.name}")
+            return f, cache_key, display_name
+            
+        except Exception as upload_error:
+            _log_error(f"Upload failed for {p.name}", upload_error)
+            return None, None, None
+            
     except Exception as e:
-        print(f"  Error uploading {p.name}: {e}")
+        _log_error(f"Unexpected error processing {p.name if p else 'unknown file'}", e)
         return None, None, None
 
-def _upload_pdfs(paths):
+def _upload_pdfs(paths, timeout_seconds=300):
     """
     Upload files to Gemini in parallel, reusing existing uploads when possible.
     
+    Args:
+        paths: List of file paths or ProcessedFile objects to upload
+        timeout_seconds: Maximum time to wait for uploads to complete
+        
     Returns:
-        List of uploaded file objects
+        List of tuples containing (file_object, display_name)
     """
+    if not paths:
+        print("Warning: No files to upload")
+        return []
+        
     uploaded = []
     ext_to_mime = {
         '.pdf': 'application/pdf',
@@ -243,87 +324,205 @@ def _upload_pdfs(paths):
         '.ods': 'application/vnd.oasis.opendocument.spreadsheet',
         '.md': 'text/markdown',
         '.markdown': 'text/markdown',
-        '.txt': 'text/plain'
+        '.md': 'text/markdown',
+        '.txt': 'text/plain',
+        '.text': 'text/plain'
     }
     
-    # Always start with a fresh cache to ensure new files are processed
-    upload_cache = {}
-    if PERSIST_UPLOADS and os.path.exists(UPLOAD_CACHE_FILE):
-        try:
-            os.remove(UPLOAD_CACHE_FILE)
-            print("Cleared existing upload cache to ensure fresh uploads")
-        except Exception as e:
-            print(f"Warning: Could not clear upload cache: {e}")
+    # Load existing upload cache if it exists
+    upload_cache = _load_upload_cache() if PERSIST_UPLOADS else {}
     cache_updated = False
     
     # Process files in parallel with a reasonable number of workers
-    max_workers = min(MAX_WORKERS, 8)  # Limit to 8 workers to avoid rate limiting
-    print(f"Uploading {len(paths)} files using {max_workers} workers...")
+    max_workers = min(MAX_WORKERS, 4)  # Reduced from 8 to 4 to avoid rate limiting
+    print(f"\n=== Starting upload of {len(paths)} files using {max_workers} workers (timeout: {timeout_seconds}s) ===")
+    
+    start_time = time.time()
+    processed_count = 0
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all upload tasks
-        future_to_path = {
-            executor.submit(_upload_single_file, Path(p), upload_cache, ext_to_mime): p 
-            for p in paths
-            if Path(p).exists()  # Only include files that exist
-        }
-        
-        # Process results as they complete
-        for future in as_completed(future_to_path):
-            path = future_to_path[future]
+        future_to_path = {}
+        for p in paths:
             try:
-                result, cache_key, file_name = future.result()
-                if result:
-                    uploaded.append(result)
-                    if cache_key and file_name:
-                        upload_cache[cache_key] = file_name
-                        cache_updated = True
+                if isinstance(p, ProcessedFile):
+                    path = p.path
+                    source_url = p.source_url
                 else:
-                    print(f"Warning: Failed to upload {path}")
+                    path = Path(p) if not isinstance(p, Path) else p
+                    source_url = None
+                
+                if not path or not path.exists():
+                    print(f"Warning: File does not exist, skipping: {getattr(p, 'name', str(p))}")
+                    continue
+                    
+                future = executor.submit(_upload_single_file, path, upload_cache, ext_to_mime, source_url)
+                future_to_path[future] = path
+                processed_count += 1
+                
             except Exception as e:
-                print(f"Error processing {path}: {e}")
+                print(f"Error preparing upload for {getattr(p, 'name', str(p))}: {e}")
+        
+        if not future_to_path:
+            print("No valid files to process after validation")
+            return []
+            
+        print(f"Processing {len(future_to_path)} files...")
+        
+        # Process results as they complete with timeout
+        try:
+            for future in concurrent.futures.as_completed(future_to_path, timeout=timeout_seconds):
+                remaining_time = timeout_seconds - (time.time() - start_time)
+                if remaining_time <= 0:
+                    print(f"\nUpload timeout after {timeout_seconds} seconds. Some files may not have been uploaded.")
+                    break
+                    
+                path = future_to_path[future]
+                try:
+                    result, cache_key, display_name = future.result(timeout=min(60, remaining_time))
+                    if result and cache_key and display_name:
+                        # Store the file and its display name as a tuple
+                        uploaded.append((result, display_name))
+                        # Store the file name in the cache, not the display name
+                        upload_cache[cache_key] = result.name  # Store the Gemini file ID
+                        cache_updated = True
+                        print(f"  ✓ Successfully processed: {display_name}")
+                    else:
+                        print(f"  ✗ Failed to process: {getattr(path, 'name', str(path))}")
+                        
+                except concurrent.futures.TimeoutError:
+                    print(f"\nTimeout processing {getattr(path, 'name', str(path))}. Skipping...")
+                except Exception as e:
+                    print(f"Error processing {getattr(path, 'name', str(path))}: {e}")
+                    
+        except concurrent.futures.TimeoutError:
+            print(f"\nOverall upload timeout after {timeout_seconds} seconds. Some files may not have been processed.")
+        except KeyboardInterrupt:
+            print("\nUpload process interrupted by user. Cleaning up...")
+            raise
+        except Exception as e:
+            print(f"\nUnexpected error during upload: {e}")
     
     # Save updated cache if we made any changes
     if cache_updated and PERSIST_UPLOADS:
-        _save_upload_cache(upload_cache)
+        try:
+            _save_upload_cache(upload_cache)
+        except Exception as e:
+            print(f"Warning: Could not save upload cache: {e}")
     
-    print(f"Successfully uploaded {len(uploaded)}/{len(paths)} files")
+    elapsed = time.time() - start_time
+    success_count = len(uploaded)
+    failed_count = processed_count - success_count
+    
+    print("\n" + "="*50)
+    print(f"UPLOAD SUMMARY")
+    print("="*50)
+    print(f"Total files processed: {processed_count}")
+    print(f"Successfully uploaded: {success_count}")
+    if failed_count > 0:
+        print(f"Failed uploads: {failed_count}")
+    print(f"Time taken: {elapsed:.1f} seconds")
+    print("="*50)
+    
     return uploaded
 
-def _wait_for_files_active(files, timeout_seconds: int = 180, poll_seconds: int = 2):
-    if not files:
+def _wait_for_files_active(uploaded_files, timeout_seconds: int = 600, initial_poll: int = 5, max_poll: int = 60):
+    """
+    Wait for all uploaded files to become active using an exponential backoff polling strategy
+    to avoid triggering API rate limits.
+    
+    Args:
+        uploaded_files: List of (file_object, display_name) tuples from _upload_pdfs
+        timeout_seconds: Maximum time to wait for all files to become active (default: 600s/10min)
+        initial_poll: The first wait time between status checks (default: 5s)
+        max_poll: The maximum wait time between status checks for a single file (default: 60s)
+        
+    Returns:
+        List of (file_object, display_name) tuples for files that became active
+    """
+    if not uploaded_files:
+        print("No files to wait for - empty input list")
         return []
-    deadline = time.time() + timeout_seconds
-    remaining = {f.name for f in files}
-    last_states = {}
-    while remaining and time.time() < deadline:
-        next_remaining = set()
-        for fid in list(remaining):
+        
+    start_time = time.time()
+    active_files = []
+    failed_files = []
+    
+    # Create a dictionary to track each file's polling state
+    pending_files = {
+        file_obj.name: {
+            "file_info": (file_obj, display_name),
+            "poll_interval": initial_poll, # Time to wait before next check
+            "next_check": time.time() + initial_poll # The time at which we should next check this file
+        } for file_obj, display_name in uploaded_files if file_obj
+    }
+
+    print(f"\n🔄 Waiting for {len(pending_files)} files to become active (timeout: {timeout_seconds}s)...")
+
+    while pending_files and (time.time() - start_time) < timeout_seconds:
+        current_time = time.time()
+        
+        # Find files that are ready to be checked
+        files_to_check = [
+            name for name, state in pending_files.items() if current_time >= state["next_check"]
+        ]
+
+        if not files_to_check:
+            # If no files are ready for a check, sleep for a short duration to avoid a busy-wait loop
+            time.sleep(1)
+            continue
+
+        for name in files_to_check:
+            state = pending_files[name]
+            file_obj, display_name = state["file_info"]
+
             try:
-                f = genai.get_file(name=fid)
-                state = getattr(getattr(f, 'state', None), 'name', None)
-                last_states[fid] = state
-                if state == 'ACTIVE':
-                    continue
-                elif state == 'FAILED':
-                    print(f"File processing failed: {fid}")
-                else:
-                    next_remaining.add(fid)
+                # Get the latest status of the file
+                file_status = genai.get_file(name=file_obj.name)
+                
+                if file_status.state.name == 'ACTIVE':
+                    print(f"  ✅ {display_name} is now ACTIVE")
+                    # Store both file object and display name as a tuple
+                    active_files.append((file_obj, display_name))
+                    del pending_files[name] # Remove from pending list
+                    
+                elif file_status.state.name == 'FAILED':
+                    error_msg = getattr(file_status, 'error', 'No error details')
+                    print(f"  ❌ {display_name} FAILED: {error_msg}")
+                    failed_files.append((file_obj, display_name, error_msg))
+                    del pending_files[name] # Remove from pending list
+                    
+                else: # Still PROCESSING or in another state
+                    # Increase the poll interval for the next check (exponential backoff)
+                    state["poll_interval"] = min(state["poll_interval"] * 1.5, max_poll)
+                    state["next_check"] = time.time() + state["poll_interval"]
+                    print(f"  ⏳ {display_name} is {file_status.state.name}. Retrying in {state['poll_interval']:.0f}s...")
+
             except Exception as e:
-                print(f"Error checking file {fid}: {e}")
-        remaining = next_remaining
-        if remaining:
-            time.sleep(poll_seconds)
-    # Return only ACTIVE files
-    ready = []
-    for f in files:
-        try:
-            g = genai.get_file(name=f.name)
-            if getattr(getattr(g, 'state', None), 'name', None) == 'ACTIVE':
-                ready.append(g)
-        except Exception:
-            pass
-    return ready
+                # If a check fails, increase interval and retry
+                state["poll_interval"] = min(state["poll_interval"] * 2, max_poll)
+                state["next_check"] = time.time() + state["poll_interval"]
+                print(f"  ⚠️  Error checking {display_name}: {e}. Retrying in {state['poll_interval']:.0f}s...")
+
+    # Final status update
+    print("\n" + "="*50)
+    print("📋 Final Status:")
+    print(f"  ✅ Successfully activated: {len(active_files)}/{len(uploaded_files)} files")
+    
+    if failed_files:
+        print(f"\n❌ Failed files ({len(failed_files)}):")
+        for file_obj, display_name, error in failed_files:
+            print(f"  - {display_name}: {error}")
+    
+    if pending_files:
+        timed_out_count = len(pending_files)
+        print(f"\n⚠️  Timed out waiting for {timed_out_count} files:")
+        for name, state in pending_files.items():
+            print(f"  - {state['file_info'][1]}")
+    
+    print("="*50 + "\n")
+    # Return list of (file_object, display_name) tuples for active files
+    return active_files
 
 def can_fetch_url(url: str, rp: Optional[RobotFileParser] = None) -> bool:
     """Check if we're allowed to fetch this URL based on robots.txt."""
@@ -485,13 +684,42 @@ def fetch_website_content(url: str, crawl: bool = True, max_pages: int = 50):
         traceback.print_exc()
         return None
 
+def cleanup_temp_files(temp_files):
+    """Safely clean up temporary files."""
+    if not temp_files:
+        return
+        
+    print("\n=== Cleaning up temporary files ===")
+    for temp_file in temp_files:
+        try:
+            if temp_file and isinstance(temp_file, (str, Path)):
+                temp_path = Path(temp_file)
+                if temp_path.exists():
+                    temp_path.unlink()
+                    print(f"  Deleted temporary file: {temp_path}")
+        except Exception as e:
+            print(f"  Warning: Could not delete temporary file {temp_file}: {e}")
+
 def prepare_gemini_files():
-    """Prepare documents based on SOURCES configuration."""
+    """
+    Prepare documents based on SOURCES configuration.
+    
+    Returns:
+        List of (file_object, display_name) tuples for successfully processed files
+    """
     all_files = []
-    website_files = []  # Initialize website_files here
-    temp_files = []  # Track temporary files for cleanup
+    website_files = []
+    temp_files = []
+    
+    # Verify Gemini API is configured
+    if not GEMINI_API_KEY:
+        print("Error: GEMINI_API_KEY is not set. Cannot prepare files for Gemini.")
+        return []
     
     try:
+        # Configure Gemini API
+        genai.configure(api_key=GEMINI_API_KEY)
+        print("Gemini API configured successfully")
         # Process sources based on configuration
         if SOURCES in ['both', 'docs']:
             paths = _find_doc_paths(DOCS_DIR)
@@ -501,8 +729,8 @@ def prepare_gemini_files():
                 
             print(f"\n=== Found {len(paths)} local documents in {DOCS_DIR} ===")
             
-            # Convert markdown files to text files for Gemini
-            processed_paths = []
+            # Process documents
+            processed_files = []
             
             for path in paths:
                 try:
@@ -514,34 +742,50 @@ def prepare_gemini_files():
                     print(f"Processing: {path.name}")
                     
                     if path.suffix.lower() in ('.md', '.markdown'):
-                        # Create a text version of markdown files
+                        # For markdown files, extract SOURCE_URL if present
                         try:
                             with open(path, 'r', encoding='utf-8') as f:
                                 content = f.read()
-                            # Create a temporary file for the combined content
+                            
+                            # Extract SOURCE_URL if present
+                            source_url = _extract_source_url(content)
+                            
+                            # Create a temporary file for the content
                             with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
                                 temp_file_path = Path(f.name)
                                 f.write(f"# {path.name}\n\n{content}")
-                            processed_paths.append(temp_file_path)
-                            temp_files.append(temp_file_path)  # Track for cleanup
+                            
+                            processed_files.append(ProcessedFile(
+                                path=temp_file_path,
+                                source_url=source_url
+                            ))
+                            temp_files.append(temp_file_path)
                             print(f"  Converted to text: {temp_file_path.name}")
+                            if source_url:
+                                print(f"  Using source URL: {source_url}")
+                                
                         except Exception as e:
                             print(f"Error processing {path}: {e}")
                     else:
-                        processed_paths.append(path)
+                        # For non-markdown files, just add them as-is
+                        processed_files.append(ProcessedFile(path=path))
                         print(f"  Added to upload queue: {path.name}")
+                        
                 except Exception as e:
                     print(f"Error handling {path}: {e}")
             
-            print(f"\n=== Uploading {len(processed_paths)} processed documents to Gemini ===")
+            print(f"\n=== Uploading {len(processed_files)} processed documents to Gemini ===")
             
-            if processed_paths:
-                uploaded = _upload_pdfs(processed_paths)
+            if processed_files:
+                uploaded = _upload_pdfs(processed_files)
                 ready = _wait_for_files_active(uploaded)
                 
                 if ready:
-                    all_files.extend(ready)
-                    names = "\n- " + "\n- ".join(getattr(f, 'display_name', getattr(f, 'name', str(f))) for f in ready)
+                    # Store both file objects and display names for the final result
+                    all_files.extend(ready)  # Each item is (file_obj, display_name)
+                    
+                    # Print summary with display names
+                    names = "\n- " + "\n- ".join(display_name for _, display_name in ready)
                     print(f"\n=== Successfully processed {len(ready)} local documents ==={names}")
                 else:
                     print("Warning: No local documents were successfully processed")
@@ -751,6 +995,19 @@ def setup_sheets_client():
 
 def process_requirements():
     """Main function to process requirements and update sheets"""
+    # Initialize Gemini API
+    if not GEMINI_API_KEY:
+        print("Error: GEMINI_API_KEY environment variable is not set")
+        print("Please set the GEMINI_API_KEY environment variable and try again")
+        return
+    
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        print("Successfully initialized Gemini API")
+    except Exception as e:
+        print(f"Error initializing Gemini API: {e}")
+        return
+    
     # Connect to Google Sheets
     client = setup_sheets_client()
     
@@ -794,16 +1051,19 @@ def process_requirements():
     # Build allowed document names list for citation
     allowed_doc_names = []
     if provided_files:
-        for _f in provided_files:
-            display_name = getattr(_f, 'display_name', None)
-            name_fallback = getattr(_f, 'name', '')
-            base_name = os.path.basename(name_fallback) if name_fallback else None
-            
-            # For website content, use the URL as the display name
-            if 'http' in str(display_name or ''):
+        for file_obj, display_name in provided_files:
+            if not file_obj:
+                continue
+                
+            # Use the display name we stored during upload
+            if display_name:
                 allowed_doc_names.append(display_name)
             else:
-                allowed_doc_names.append(display_name or base_name)
+                # Fallback to file name if no display name
+                file_name = getattr(file_obj, 'name', '')
+                if file_name:
+                    base_name = os.path.basename(file_name)
+                    allowed_doc_names.append(base_name)
     
     # Add website URLs directly to the allowed document names if using website sources
     if SOURCES in ['both', 'website']:
@@ -920,9 +1180,18 @@ Allowed document names and URLs (you must cite exactly one of these when providi
 
     def _worker_generate(req_text: str) -> str:
         prompt = _build_prompt(req_text)
-        inputs = [prompt] + provided_files if provided_files else [prompt]
+        
         # Create a local model instance per thread for safety
         local_model = genai.GenerativeModel('gemini-1.5-pro')
+        
+        # Prepare the input with proper file handling
+        if provided_files:
+            # Extract just the file objects (first element of each tuple)
+            file_objects = [file_obj for file_obj, _ in provided_files if file_obj is not None]
+            inputs = [prompt] + file_objects
+        else:
+            inputs = [prompt]
+            
         response = generate_with_retry(local_model, inputs)
         compliance_statement = getattr(response, 'text', '')
         compliance_statement = compliance_statement.strip() if compliance_statement else ''
@@ -962,6 +1231,20 @@ Allowed document names and URLs (you must cite exactly one of these when providi
 
     print("Processing complete!")
 
+def main():
+    """Main entry point with proper error handling and cleanup."""
+    try:
+        print("=== Starting Security Questionnaire Responder ===")
+        process_requirements()
+    except KeyboardInterrupt:
+        print("\nOperation cancelled by user. Cleaning up...")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("\n=== Processing complete. Exiting. ===")
+        sys.exit(0)
+
 if __name__ == "__main__":
-    # Run the actual processing
-    process_requirements()
+    main()
