@@ -1,20 +1,14 @@
-name: Build Binaries
+name: Test Nuitka Build
 
 on:
-  push:
-    tags:
-      - "v*.*.*"   # Build on version tags like v1.0.0
-  workflow_dispatch: # Allow manual runs
+  workflow_dispatch: # manual trigger only
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -28,19 +22,8 @@ jobs:
           pip install -r requirements.txt
           pip install nuitka
 
-      - name: Build rfir-lm (CLI tool)
+      - name: Build with Nuitka
         run: |
-          python -m nuitka --onefile --output-filename=rfir-lm rfir-lm.py
-
-      - name: Build rfir-web-front-end (Flask web UI)
-        run: |
-          python -m nuitka --onefile --output-filename=rfir-web-front-end app.py
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.os }}
-          path: |
-            rfir-lm*
-            rfir-web-front-end*
-
+          echo "Starting Nuitka build..."
+          python -m nuitka --onefile rfir-lm.py
+          echo "Nuitka build completed."
