@@ -25,5 +25,5 @@ jobs:
       - name: Build with Nuitka
         run: |
           echo "Starting Nuitka build..."
-          python -m nuitka --onefile rfir-lm.py
+          python -m nuitka --onefile security_questionnaire_responder.py
           echo "Nuitka build completed."
