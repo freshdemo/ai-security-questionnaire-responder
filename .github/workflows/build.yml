@@ -30,11 +30,11 @@ jobs:
 
       - name: Build rfir-lm (CLI tool)
         run: |
-          python -m nuitka --onefile --standalone --output-filename=rfir-lm rfir-lm.py
+          python -m nuitka --onefile --output-filename=rfir-lm rfir-lm.py
 
       - name: Build rfir-web-front-end (Flask web UI)
         run: |
-          python -m nuitka --onefile --standalone --output-filename=rfir-web-front-end app.py
+          python -m nuitka --onefile --output-filename=rfir-web-front-end app.py
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
