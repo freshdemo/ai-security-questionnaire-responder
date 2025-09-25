@@ -20,6 +20,47 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as
 from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 from typing import Set, List, Optional, Dict, Any, Tuple, NamedTuple
+import difflib
+
+def _find_best_source_match(reference: str, allowed_sources: List[str]) -> Optional[str]:
+    """Find the best matching source from allowed sources."""
+    if not reference or not allowed_sources:
+        return None
+    
+    # Try exact match first
+    reference_lower = reference.lower()
+    for src in allowed_sources:
+        if reference_lower == src.lower():
+            return src
+    
+    # Try partial match
+    for src in allowed_sources:
+        if reference_lower in src.lower() or src.lower() in reference_lower:
+            return src
+    
+    # Try fuzzy matching
+    matches = difflib.get_close_matches(reference, allowed_sources, n=1, cutoff=0.6)
+    return matches[0] if matches else None
+
+def _extract_references(text: str) -> List[str]:
+    """Extract source references from text."""
+    # Look for patterns like "Reference: X", "Source: X", "(Source: X)", etc.
+    patterns = [
+        r'(?:Reference|Source|Document|From)[: ]+([^\n\),;]+)',
+        r'\(\s*(?:Reference|Source|Document|From)[: ]+([^)\\n]+)\)',
+        r'\[(?:Reference|Source|Document|From)[: ]+([^\]]+)\]'
+    ]
+    
+    references = []
+    for pattern in patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            # Clean up the reference
+            ref = re.sub(r'^[\s\-\*]+|[\s\-\*]+$', '', match)
+            if ref and len(ref) > 2:  # Filter out very short references
+                references.append(ref)
+    
+    return references
 
 class ProcessedFile(NamedTuple):
     """Container for processed file information."""
@@ -1128,10 +1169,11 @@ def process_requirements():
 
     print(f"Submitting {len(rows_to_process)} rows to Gemini (max_workers={MAX_WORKERS})...")
 
-    def _build_prompt(req_text: str) -> str:
-        source_instructions = ""
-        if SOURCES == 'both':
-            source_instructions = """# SOURCE PRIORITY (MUST FOLLOW):
+    def _build_prompt(req_text: str, first_pass: bool = True) -> str:
+        if first_pass:
+            source_instructions = ""
+            if SOURCES == 'both':
+                source_instructions = """# SOURCE PRIORITY (MUST FOLLOW):
 1. FIRST check ALL website content for relevant information
 2. ONLY if no relevant website content is found, check local documents
 3. NEVER mix information from different sources
@@ -1140,18 +1182,19 @@ def process_requirements():
 - WEBSITE CONTENT TAKES PRECEDENCE OVER LOCAL DOCUMENTS
 - If ANY website content is relevant, you MUST use it and IGNORE local documents
 - Only look at local documents if ALL website content is irrelevant"""
-        elif SOURCES == 'website':
-            source_instructions = """# SOURCE INSTRUCTIONS:
+            elif SOURCES == 'website':
+                source_instructions = """# SOURCE INSTRUCTIONS:
 - Use ONLY the provided website content
 - If no website content is relevant, respond with: not_found
 - Do not reference or use any local documents"""
-        else:  # docs only
-            source_instructions = """# SOURCE INSTRUCTIONS:
+            else:  # docs only
+                source_instructions = """# SOURCE INSTRUCTIONS:
 - Use ONLY the provided local documents
 - If no document is relevant, respond with: not_found"""
 
-        prompt = f"""# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
+            prompt = f"""# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
 # ACTIVE SOURCES: {SOURCES.upper()}
+# PASS: FIRST PASS (QUICK SCAN)
 
 Requirement to evaluate:
 "{req_text}"
@@ -1176,60 +1219,158 @@ Requirement to evaluate:
 
 Allowed document names and URLs (you must cite exactly one of these when providing a reference):
 {allowed_doc_names_text}"""
+        else:
+            # Second pass - more thorough analysis
+            prompt = f"""# INSTRUCTION: RE-ANALYZE REQUIREMENT WITH DEEPER CONTEXT
+# ACTIVE SOURCES: {SOURCES.upper()}
+# PASS: SECOND PASS (DETAILED ANALYSIS)
+
+Requirement to evaluate (please analyze carefully):
+"{req_text}"
+
+# INSTRUCTIONS:
+1. Perform a DEEPER SEARCH through all available sources
+2. Pay special attention to:
+   - Specific sections or page numbers
+   - Related policies or procedures
+   - Implementation details
+3. If the requirement has multiple parts, address EACH part specifically
+4. Be as detailed and precise as possible
+
+# RESPONSE REQUIREMENTS:
+- Base your response on the most relevant single source
+- Be VERY specific about which part of the source supports your answer
+- Include section numbers, page numbers, or specific document locations
+- Keep the entire response on a single line (no newlines)
+- If the requirement is multi-part, clearly indicate which parts are addressed
+- If truly no source contains relevant information, respond with: not_found
+
+# RESPONSE FORMAT (follow exactly):
+"[Compliant/Non-compliant/Partially Compliant] - [detailed reasoning with specific references] (Reference: [Source identifier], [specific section/page])"
+
+# CRITICAL REMINDERS:
+- This is a SECOND PASS - your response should be more thorough than the first pass
+- If you found partial information in the first pass, look HARDER for more complete information
+- If still uncertain after thorough searching, respond with: not_found
+
+Allowed document names and URLs (you must cite exactly one of these when providing a reference):
+{allowed_doc_names_text}"""
         return prompt
 
-    def _worker_generate(req_text: str) -> str:
-        prompt = _build_prompt(req_text)
+    def _worker_generate(req_text: str, first_pass: bool = True) -> Tuple[str, bool]:
+        """Generate a response for a requirement with optional second pass.
+        
+        Args:
+            req_text: The requirement text to process
+            first_pass: Whether this is the first pass (True) or second pass (False)
+            
+        Returns:
+            Tuple of (response_text, needs_second_pass)
+        """
+        prompt = _build_prompt(req_text, first_pass)
         
         # Create a local model instance per thread for safety
         local_model = genai.GenerativeModel('gemini-1.5-pro')
         
         # Prepare the input with proper file handling
-        if provided_files:
-            # Extract just the file objects (first element of each tuple)
-            file_objects = [file_obj for file_obj, _ in provided_files if file_obj is not None]
-            inputs = [prompt] + file_objects
-        else:
-            inputs = [prompt]
+        file_objects = [file_obj for file_obj, _ in (provided_files or []) if file_obj is not None]
+        inputs = [prompt] + file_objects
             
         response = generate_with_retry(local_model, inputs)
         compliance_statement = getattr(response, 'text', '')
         compliance_statement = compliance_statement.strip() if compliance_statement else ''
-        return _normalize_compliance_statement(compliance_statement, allowed_doc_names)
+        
+        # Normalize the response
+        normalized = _normalize_compliance_statement(compliance_statement, allowed_doc_names)
+        
+        # Check if we need a second pass
+        needs_second_pass = first_pass and (
+            'not_found' in normalized.lower() or 
+            'uncertain' in normalized.lower() or
+            'partially' in normalized.lower() or
+            'i don\'t know' in normalized.lower() or
+            'i do not know' in normalized.lower()
+        )
+        
+        return normalized, needs_second_pass
+        
+    def _verify_and_fix_sources(response: str) -> str:
+        """Verify and fix source references in the response."""
+        if not response or 'not_found' in response.lower():
+            return response
+            
+        # Extract all references from the response
+        references = _extract_references(response)
+        if not references:
+            return response
+            
+        # Check each reference against allowed sources
+        for ref in references:
+            best_match = _find_best_source_match(ref, allowed_doc_names)
+            if best_match and best_match.lower() != ref.lower():
+                # Replace the reference with the best match
+                response = re.sub(
+                    re.escape(ref), 
+                    best_match, 
+                    response, 
+                    flags=re.IGNORECASE
+                )
+                print(f"  ✓ Fixed source reference: '{ref}' -> '{best_match}'")
+                
+        return response
 
-    # Run Gemini generations concurrently and write each result as it completes
-    with ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS)) as executor:
-        future_to_row = {
-            executor.submit(_worker_generate, req_text): row
-            for (row, req_text) in rows_to_process
-        }
-        for future in as_completed(future_to_row):
-            row = future_to_row[future]
-            try:
-                value = future.result()
-            except Exception as e:
-                value = f"ERROR: {e}"
-            print(f"✓ Gemini completed for row {row}")
-            try:
-                sheet = update_cell_with_retry(sheet, row, compliance_col_index, value)
-                # Optional verification and A1 fallback
-                if VERIFY_WRITES:
-                    try:
-                        read_back = sheet.cell(row, compliance_col_index).value or ''
-                        if not read_back.strip():
-                            col_letter = _column_index_to_letter(compliance_col_index)
-                            a1 = f"{col_letter}{row}"
-                            print(f"Write verification failed for row {row}. Retrying with range update at {a1}...")
-                            sheet.update(a1, [[value]])
-                    except Exception as _verify_err:
-                        print(f"Verification error for row {row}: {_verify_err}")
-                print(f"✓ Updated row {row}")
-                time.sleep(0.5)  # gentle pacing for Sheets API
-            except Exception as e:
-                print(f"✗ Error updating row {row}: {e}")
-                time.sleep(0.5)
+    def process_batch(rows_batch, is_second_pass=False):
+        """Process a batch of rows with optional second pass."""
+        print(f"\n{'='*80}")
+        print(f"PROCESSING {'SECOND PASS - ' if is_second_pass else ''}BATCH OF {len(rows_batch)} ROWS")
+        print(f"{'='*80}")
+        
+        needs_second_pass = []
+        
+        with ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS)) as executor:
+            future_to_row = {
+                executor.submit(_worker_generate, req_text, not is_second_pass): (row_idx, req_text)
+                for row_idx, req_text in rows_batch
+            }
 
-    print("Processing complete!")
+            for future in as_completed(future_to_row):
+                row_idx, req_text = future_to_row[future]
+                try:
+                    compliance_statement, needs_retry = future.result()
+                    
+                    # Apply source verification and fixing
+                    compliance_statement = _verify_and_fix_sources(compliance_statement)
+                    
+                    print(f"Row {row_idx}: {compliance_statement}")
+                    if is_second_pass:
+                        # Mark as reviewed after second pass
+                        compliance_statement = f"{compliance_statement} [REVIEWED]"
+                    
+                    update_cell_with_retry(sheet, row_idx, compliance_col_index, compliance_statement)
+                    
+                    # Track rows that need a second pass
+                    if needs_retry and not is_second_pass:
+                        needs_second_pass.append((row_idx, req_text))
+                        print(f"  → Will reprocess row {row_idx} in second pass")
+                            
+                except Exception as e:
+                    error_msg = f"ERROR: {str(e)[:200]}"
+                    print(f"Error processing row {row_idx}: {error_msg}")
+                    sheet.update_cell(row_idx, compliance_col_index, error_msg)
+        
+        return needs_second_pass
+    
+    # First pass - process all rows
+    needs_second_pass = process_batch(rows_to_process, is_second_pass=False)
+    
+    # Second pass - reprocess rows that need it
+    if needs_second_pass:
+        print(f"\n{'='*80}")
+        print(f"STARTING SECOND PASS FOR {len(needs_second_pass)} ROWS")
+        print(f"{'='*80}")
+        process_batch(needs_second_pass, is_second_pass=True)
+    
+    print("\nProcessing complete!")
 
 def main():
     """Main entry point with proper error handling and cleanup."""
