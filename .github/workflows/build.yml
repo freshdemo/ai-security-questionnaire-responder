@@ -34,11 +34,6 @@ jobs:
           python -m nuitka --onefile --output-filename=security_questionnaire_responder security_questionnaire_responder.py
           echo "security_questionnaire_responder.py build completed."
 
-      - name: Build rfir-web-front-end (Flask UI)
-        run: |
-          echo "Building rfir-web-front-end..."
-          python -m nuitka --onefile --output-filename=rfir-web-front-end app.py
-          echo "rfir-web-front-end build completed."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -46,4 +41,3 @@ jobs:
           name: binaries-${{ matrix.os }}
           path: |
             security_questionnaire_responder*
-            rfir-web-front-end*
