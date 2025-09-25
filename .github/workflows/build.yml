@@ -1,9 +1,9 @@
-name: Build Binaries
+name: Build and Release Binaries
 
 on:
   push:
     tags:
-      - "v*.*.*"   # e.g. v1.0.0
+      - "v*.*.*"
   workflow_dispatch:
 
 jobs:
@@ -12,6 +12,9 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+
+    env:
+      NUITKA_USE_DEPENDENCY_WALKER: "yes"
 
     steps:
       - name: Checkout
@@ -30,14 +33,41 @@ jobs:
 
       - name: Build rfir-lm (CLI tool)
         run: |
-          echo "Building rfir-lm..."
+          echo "Building security_questionnaire_responder..."
           python -m nuitka --onefile --output-filename=security_questionnaire_responder security_questionnaire_responder.py
-          echo "security_questionnaire_responder.py build completed."
+          echo "security_questionnaire_responder build completed."
 
-
-      - name: Upload artifacts
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
           path: |
             security_questionnaire_responder*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts from all OS builds
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: "Automated release of security_questionnaire_responder binaries."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/security_questionnaire_responder*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
