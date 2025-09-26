@@ -1,0 +1,7 @@
+gspread
+google-generativeai
+google-auth
+google-api-core
+requests
+beautifulsoup4
+

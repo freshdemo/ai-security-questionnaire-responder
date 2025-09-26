@@ -1,0 +1,15 @@
+# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
+# ACTIVE SOURCES: {sources_upper}
+# PASS: SECOND PASS (DETAILED ANALYSIS)
+
+Requirement to evaluate:
+"{requirement_text}"
+
+{source_instructions}
+
+# TASK: Provide a comprehensive analysis
+# - Include relevant details and context
+# - Reference specific document sections if applicable
+# - If no relevant information, explain why and suggest next steps
+
+DETAILED ANALYSIS:

@@ -1,0 +1,13 @@
+{
+  "GEMINI_API_KEY": "your-google-gemini-api-key-here",
+  "SPREADSHEET_ID": "your-google-sheets-id-here",
+  "WORKSHEET_INDEX": 0,
+  "MAX_WORKERS": 4,
+  "SOURCES": "both",
+  "DOCS_DIRECTORY": "./docs",
+  "WEBSITE_URL": "https://docs.snyk.io",
+  "VERIFY_WRITES": true,
+  "PERSIST_UPLOADS": true,
+  "UPLOAD_CACHE_FILE": "upload_cache.json",
+  "LOG_LEVEL": "INFO"
+}

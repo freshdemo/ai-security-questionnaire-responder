@@ -1,4 +1,5 @@
-name: Build Binaries
+
+name: Build and Release Binaries
 
 on:
   push:
@@ -9,9 +10,14 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+
+    env:
+      NUITKA_AUTO_DOWNLOAD: "yes"  # auto-accept helper downloads
+      NUITKA_USE_DEPENDENCY_WALKER: "yes"
 
     steps:
       - name: Checkout repository
@@ -26,20 +32,52 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka
+          pip install nuitka zstandard
+
+      # --- Windows fix for Dependency Walker ---
+      - name: Install Dependency Walker (Windows only)
+        if: runner.os == 'Windows'
+        run: |
+          $dependsPath = "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\depends\x86_64"
+          mkdir -Force $dependsPath
+          curl -L -o depends.zip https://dependencywalker.com/depends22_x64.zip
+          tar -xf depends.zip -C $dependsPath
 
       - name: Build rfir-lm (CLI tool)
         run: |
-          python -m nuitka --onefile --standalone --output-filename=rfir-lm rfir-lm.py
-
-      - name: Build rfir-web-front-end (Flask web UI)
-        run: |
-          python -m nuitka --onefile --standalone --output-filename=rfir-web-front-end app.py
-
-      - name: Upload artifacts
+          echo "Building security_questionnaire_responder..."
+          python -m nuitka --onefile --enable-plugin=tk-inter --include-package=config --include-data-files=config.json.sample=config.json.sample --show-progress --verbose --output-dir=dist security_questionnaire_responder.py
+      
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
-          path: |
-            rfir-lm*
-            rfir-web-front-end*
+          path: dist/security_questionnaire_responder*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts from all OS builds
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          body: "Automated release of security_questionnaire_responder binaries."
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
