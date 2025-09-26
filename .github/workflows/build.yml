@@ -42,7 +42,6 @@ jobs:
             --include-package=config \
             --include-data-files=config.json.sample=config.json.sample \
             --show-progress \
-            --verbose \
             --output-dir=dist \
             security_questionnaire_responder.py
           echo "security_questionnaire_responder build completed."
