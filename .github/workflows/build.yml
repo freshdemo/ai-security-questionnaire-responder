@@ -29,12 +29,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install nuitka
+          pip install nuitka zstandard
 
       - name: Build rfir-lm (CLI tool)
         run: |
           echo "Building security_questionnaire_responder..."
-          python -m nuitka --onefile --output-filename=security_questionnaire_responder security_questionnaire_responder.py
+          #python -m nuitka --onefile --output-filename=security_questionnaire_responder security_questionnaire_responder.py
+          python -m nuitka \
+            --onefile \
+            --enable-plugin=tk-inter \
+            --include-package=config \
+            --include-data-files=config.json.sample=config.json.sample \
+            --output-dir=dist \
+            security_questionnaire_responder.py
           echo "security_questionnaire_responder build completed."
 
       - name: Upload build artifacts

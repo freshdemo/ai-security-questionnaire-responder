@@ -1,6 +1,7 @@
 *.json
 *docs/
 *.csv
+*.log
 __pycache__/
 ai-security-questionnaire-responder-env
 .DS_Store

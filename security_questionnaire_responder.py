@@ -1,9 +1,17 @@
 
+#!/usr/bin/env python3
+"""
+Security Questionnaire Responder
+
+Automatically responds to security questionnaires using AI-powered document analysis.
+"""
+
 import gspread
 import google.generativeai as genai
 import time
 import os
 import sys
+import logging
 from google.oauth2.service_account import Credentials
 from pathlib import Path
 import random
@@ -21,6 +29,9 @@ from urllib.parse import urljoin, urlparse, urlunparse
 from urllib.robotparser import RobotFileParser
 from typing import Set, List, Optional, Dict, Any, Tuple, NamedTuple
 import difflib
+
+# Import configuration
+from config import config
 
 def _find_best_source_match(reference: str, allowed_sources: List[str]) -> Optional[str]:
     """Find the best matching source from allowed sources."""
@@ -67,36 +78,60 @@ class ProcessedFile(NamedTuple):
     path: Path
     source_url: Optional[str] = None
 
-# Configuration
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-# Allow overriding spreadsheet and worksheet via environment variables for flexibility
-SPREADSHEET_ID = os.getenv('SPREADSHEET_ID', '1es_mPMrkUO2Ez5FtdRUkAPNDaB7i2oBa0BBzUTRCIbg')
-WORKSHEET_INDEX = int(os.getenv('WORKSHEET_INDEX', '0'))
-SERVICE_ACCOUNT_FILE = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', './snyk-cX-se-demo-0ce146967b8c.json')
-
-# Source configuration
-SOURCES = os.getenv('SOURCES', 'both').lower()  # 'both', 'website', or 'docs'
-DOCS_DIR = os.getenv('DOCS_DIR', './docs')  # Folder containing documents (PDFs, spreadsheets) to provide as context
-WEBSITE_URLS = [url.strip() for url in os.getenv('WEBSITE_URLS', '').split(',') if url.strip()]  # List of website URLs to include as context
+# Configuration is handled by config.py
+# These are kept for backward compatibility
+GEMINI_API_KEY = config.GEMINI_API_KEY
+SPREADSHEET_ID = config.SPREADSHEET_ID
+WORKSHEET_INDEX = config.WORKSHEET_INDEX
+MAX_WORKERS = config.MAX_WORKERS
+SOURCES = config.SOURCES
+DOCS_DIRECTORY = config.DOCS_DIRECTORY
+WEBSITE_URL = config.WEBSITE_URL
+VERIFY_WRITES = config.VERIFY_WRITES
+PERSIST_UPLOADS = config.PERSIST_UPLOADS
+UPLOAD_CACHE_FILE = config.UPLOAD_CACHE_FILE
+LOG_LEVEL = config.LOG_LEVEL
 
 # Performance settings
-MAX_WORKERS = int(os.getenv('GEMINI_MAX_WORKERS', '8'))  # Concurrency for Gemini requests
-VERIFY_WRITES = os.getenv('VERIFY_WRITES', 'false').lower() in {'1', 'true', 'yes'}
-PERSIST_UPLOADS = os.getenv('PERSIST_UPLOADS', 'true').lower() in {'1', 'true', 'yes'}  # Whether to persist uploaded files
-UPLOAD_CACHE_FILE = os.path.expanduser('~/.gemini_upload_cache.json')  # File to store upload cache
+MAX_RETRIES = 3  # Max retries for failed API calls
+REQUEST_TIMEOUT = 60  # Timeout for API requests in seconds
 
-# Validate source configuration
-if SOURCES not in ['both', 'website', 'docs']:
-    raise ValueError("SOURCES must be one of: 'both', 'website', or 'docs'")
+# Document processing settings
+MAX_FILE_SIZE_MB = 20  # Maximum file size to process (in MB)
+MAX_CHUNK_SIZE = 4000  # Maximum characters per chunk for large documents
+
+# Google Sheets settings
+SERVICE_ACCOUNT_FILE = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+# Gemini model configuration
+GEMINI_MODEL = 'gemini-1.5-pro'  # or 'gemini-pro' for older models
+GEMINI_GENERATION_CONFIG = {
+    'temperature': 0.3,
+    'top_p': 0.8,
+    'top_k': 40,
+    'max_output_tokens': 8192,
+}
 
 # Track auth mode for help messages
 ACTIVE_AUTH = None  # "service_account" | "oauth"
 SERVICE_ACCOUNT_EMAIL = None
 
+# Set the API endpoint
+GENAI_API_ENDPOINT = getattr(config, 'GENAI_API_ENDPOINT', 'northamerica-northeast2')
+
 # Configure Gemini
 if not GEMINI_API_KEY:
     raise SystemExit("GEMINI_API_KEY is not set. Export it and re-run.")
-genai.configure(api_key=GEMINI_API_KEY)
+genai.configure(
+    api_key=GEMINI_API_KEY,
+    client_options={
+        'api_endpoint': f'{GENAI_API_ENDPOINT}-aiplatform.googleapis.com'
+    }
+)
+# Set the model name
+GEMINI_MODEL = getattr(config, 'GEMINI_MODEL', 'gemini-1.5-pro')
+
 
 # Set up Google Sheets access
 SCOPES = [
@@ -107,29 +142,22 @@ SCOPES = [
 def _find_doc_paths(directory: str) -> list[Path]:
     """
     Find all document files (PDF, Markdown, and other supported formats) in the given directory and its subdirectories.
-    
-    Args:
-        directory: Path to the directory to search in
-        
-    Returns:
-        List of Path objects for all found documents
     """
-    supported_extensions = {
-        # Document formats
-        '.pdf',
-        '.md', '.markdown',
-        # Spreadsheet formats
-        '.xlsx', '.xls', '.csv', '.tsv', '.ods'
-    }
-    
-    try:
-        doc_paths = []
-        for ext in supported_extensions:
-            doc_paths.extend(Path(directory).rglob(f'*{ext}'))
-        return sorted(doc_paths)
-    except Exception as e:
-        print(f"Error finding documents in {directory}: {e}")
+    directory_path = Path(directory)
+    if not directory_path.exists() or not directory_path.is_dir():
         return []
+    
+    # Supported file extensions
+    extensions = [
+        '*.pdf', '*.txt', '*.md', '*.markdown', '*.csv'  # Added .csv here
+    ]
+    
+    # Find all files with the specified extensions
+    files = []
+    for ext in extensions:
+        files.extend(directory_path.rglob(ext))
+    
+    return sorted(files)
 
 def _load_upload_cache() -> Dict[str, str]:
     """Load the upload cache from disk."""
@@ -763,12 +791,12 @@ def prepare_gemini_files():
         print("Gemini API configured successfully")
         # Process sources based on configuration
         if SOURCES in ['both', 'docs']:
-            paths = _find_doc_paths(DOCS_DIR)
+            paths = _find_doc_paths(DOCS_DIRECTORY)
             if not paths:
                 print("No documents found in the specified directory.")
                 return []
                 
-            print(f"\n=== Found {len(paths)} local documents in {DOCS_DIR} ===")
+            print(f"\n=== Found {len(paths)} local documents in {DOCS_DIRECTORY} ===")
             
             # Process documents
             processed_files = []
@@ -1270,7 +1298,7 @@ Allowed document names and URLs (you must cite exactly one of these when providi
         prompt = _build_prompt(req_text, first_pass)
         
         # Create a local model instance per thread for safety
-        local_model = genai.GenerativeModel('gemini-1.5-pro')
+        local_model = genai.GenerativeModel(config.GEMINI_MODEL)
         
         # Prepare the input with proper file handling
         file_objects = [file_obj for file_obj, _ in (provided_files or []) if file_obj is not None]
@@ -1372,20 +1400,137 @@ Allowed document names and URLs (you must cite exactly one of these when providi
     
     print("\nProcessing complete!")
 
+def setup_logging():
+    """Configure logging based on the config."""
+    # Get log level from config, defaulting to INFO
+    log_level = getattr(logging, config.LOG_LEVEL.upper(), logging.INFO)
+    
+    # Create logs directory if it doesn't exist
+    log_dir = Path('logs')
+    log_dir.mkdir(exist_ok=True)
+    
+    # Set up logging configuration
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_dir / 'security_questionnaire_responder.log')
+        ]
+    )
+    
+    # Configure third-party loggers
+    for logger_name in ['google', 'urllib3', 'oauth2client']:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f'Logging initialized at level {logging.getLevelName(log_level)}')
+    return logger
+
+def check_requirements():
+    """Verify that all required configuration is present and valid."""
+    logger = logging.getLogger(__name__)
+    
+    # Check required API keys
+    if not config.GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY is required. Set it in config.json, environment, or via --gemini-api-key")
+    
+    if not config.SPREADSHEET_ID:
+        raise ValueError("SPREADSHEET_ID is required. Set it in config.json or via --spreadsheet-id")
+    
+    # Validate SOURCES configuration
+    if config.SOURCES not in ['both', 'website', 'docs']:
+        raise ValueError("SOURCES must be one of: 'both', 'website', or 'docs'")
+    
+    # Validate document directory if using docs
+    if config.SOURCES in ['both', 'docs']:
+        docs_path = Path(config.DOCS_DIRECTORY)
+        if not docs_path.exists() or not docs_path.is_dir():
+            raise FileNotFoundError(f"Document directory not found or is not a directory: {config.DOCS_DIRECTORY}")
+        logger.info(f"Using document directory: {docs_path.absolute()}")
+    
+    # Validate website URL if using website
+    if config.SOURCES in ['both', 'website']:
+        if not config.WEBSITE_URL:
+            raise ValueError("WEBSITE_URL is required when using website sources. Set it in config.json or via --website-url")
+        try:
+            parsed = urlparse(config.WEBSITE_URL)
+            if not all([parsed.scheme, parsed.netloc]):
+                raise ValueError(f"Invalid WEBSITE_URL: {config.WEBSITE_URL}")
+        except Exception as e:
+            raise ValueError(f"Invalid WEBSITE_URL: {config.WEBSITE_URL}") from e
+        logger.info(f"Using website: {config.WEBSITE_URL}")
+    
+    # Validate Google Sheets credentials
+    if not os.path.exists(SERVICE_ACCOUNT_FILE) and 'GOOGLE_APPLICATION_CREDENTIALS' not in os.environ:
+        logger.warning(
+            "Google Sheets service account file not found. "
+            "Set GOOGLE_APPLICATION_CREDENTIALS or place credentials.json in the current directory."
+        )
+    
+    logger.info("All configuration checks passed")
+
 def main():
-    """Main entry point with proper error handling and cleanup."""
+    """
+    Main entry point with proper error handling and cleanup.
+    
+    This function:
+    1. Sets up logging
+    2. Loads and validates configuration
+    3. Processes requirements
+    4. Handles errors gracefully
+    """
+    logger = None
     try:
-        print("=== Starting Security Questionnaire Responder ===")
+        # Setup logging first
+        logger = setup_logging()
+        logger.info("=== Starting Security Questionnaire Responder ===")
+        
+        # Print configuration (without sensitive data)
+        config.print_config()
+        
+        # Verify all requirements are met
+        check_requirements()
+        
+        # Initialize Gemini API
+        logger.info("Initializing Gemini API...")
+        genai.configure(api_key=config.GEMINI_API_KEY)
+        
+        # Process requirements
+        logger.info("Starting to process requirements...")
         process_requirements()
+        
+        logger.info("Processing completed successfully!")
+        
     except KeyboardInterrupt:
-        print("\nOperation cancelled by user. Cleaning up...")
+        if logger:
+            logger.warning("Operation cancelled by user")
+        print("\nOperation cancelled by user.", file=sys.stderr)
+        sys.exit(130)  # Standard exit code for keyboard interrupt
+        
     except Exception as e:
-        print(f"\nAn error occurred: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        if logger:
+            logger.critical("A critical error occurred", exc_info=True)
+        print(f"\nERROR: {e}", file=sys.stderr)
+        if isinstance(e, (ValueError, FileNotFoundError)):
+            # User configuration error
+            sys.exit(2)
+        else:
+            # Unexpected error
+            sys.exit(1)
+            
     finally:
-        print("\n=== Processing complete. Exiting. ===")
-        sys.exit(0)
+        if logger:
+            logger.info("=== Security Questionnaire Responder Finished ===")
+        
+        # Cleanup resources if needed
+        try:
+            # Add any cleanup code here
+            pass
+        except Exception as e:
+            if logger:
+                logger.error("Error during cleanup", exc_info=True)
+            print(f"Warning: Error during cleanup: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
