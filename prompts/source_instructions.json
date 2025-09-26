@@ -1,0 +1,7 @@
+{
+    "both": "# SOURCE PRIORITY (MUST FOLLOW):\n1. FIRST check ALL website content for relevant information\n2. ONLY if no relevant website content is found, check local documents\n3. NEVER mix information from different sources\n\n# IMPORTANT:\n- WEBSITE CONTENT TAKES PRECEDENCE OVER LOCAL DOCUMENTS\n- If ANY website content is relevant, you MUST use it and IGNORE local documents\n- Only look at local documents if ALL website content is irrelevant",
+    
+    "website": "# SOURCE INSTRUCTIONS:\n- Use ONLY the provided website content\n- If no website content is relevant, respond with: not_found\n- Do not reference or use any local documents",
+    
+    "docs": "# SOURCE INSTRUCTIONS:\n- Use ONLY the provided local documents\n- If no document is relevant, respond with: not_found"
+}
