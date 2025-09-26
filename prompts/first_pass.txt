@@ -1,0 +1,15 @@
+# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
+# ACTIVE SOURCES: {sources_upper}
+# PASS: FIRST PASS (QUICK SCAN)
+
+Requirement to evaluate:
+"{requirement_text}"
+
+{source_instructions}
+
+# TASK: Analyze the requirement and provide a brief response
+# - Respond with "not_found" if no relevant information is found
+# - Keep responses concise
+# - Focus on direct matches or clear relevance
+
+RESPONSE:

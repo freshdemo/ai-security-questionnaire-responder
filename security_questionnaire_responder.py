@@ -139,6 +139,44 @@ SCOPES = [
     'https://www.googleapis.com/auth/drive'
 ]
 
+def load_prompt_templates():
+    """Load all prompt templates from files."""
+    prompt_dir = Path(__file__).parent / "prompts"
+    templates = {}
+    
+    # Load source instructions
+    with open(prompt_dir / "source_instructions.json") as f:
+        templates["source_instructions"] = json.load(f)
+    
+    # Load response requirements
+    with open(prompt_dir / "response_requirements.txt") as f:
+        templates["response_requirements"] = f.read()
+    
+    return templates
+
+# Load templates at module level
+PROMPT_TEMPLATES = load_prompt_templates()
+
+def _build_prompt(self, req_text: str, first_pass: bool = True) -> str:
+    """Build the prompt for the AI model."""
+    source_instructions = PROMPT_TEMPLATES["source_instructions"][SOURCES]
+    
+    # Build the main prompt
+    prompt = f"""# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
+# ACTIVE SOURCES: {SOURCES.upper()}
+# PASS: {'FIRST PASS (QUICK SCAN)' if first_pass else 'SECOND PASS (DETAILED ANALYSIS)'}
+
+Requirement to evaluate:
+"{req_text}"
+
+{source_instructions}
+
+{PROMPT_TEMPLATES["response_requirements"]}
+
+Allowed document names and URLs (you must cite exactly one of these when providing a reference):
+"""
+    return prompt
+
 def _find_doc_paths(directory: str) -> list[Path]:
     """
     Find all document files (PDF, Markdown, and other supported formats) in the given directory and its subdirectories.
@@ -1196,94 +1234,6 @@ def process_requirements():
         return
 
     print(f"Submitting {len(rows_to_process)} rows to Gemini (max_workers={MAX_WORKERS})...")
-
-    def _build_prompt(req_text: str, first_pass: bool = True) -> str:
-        if first_pass:
-            source_instructions = ""
-            if SOURCES == 'both':
-                source_instructions = """# SOURCE PRIORITY (MUST FOLLOW):
-1. FIRST check ALL website content for relevant information
-2. ONLY if no relevant website content is found, check local documents
-3. NEVER mix information from different sources
-
-# IMPORTANT:
-- WEBSITE CONTENT TAKES PRECEDENCE OVER LOCAL DOCUMENTS
-- If ANY website content is relevant, you MUST use it and IGNORE local documents
-- Only look at local documents if ALL website content is irrelevant"""
-            elif SOURCES == 'website':
-                source_instructions = """# SOURCE INSTRUCTIONS:
-- Use ONLY the provided website content
-- If no website content is relevant, respond with: not_found
-- Do not reference or use any local documents"""
-            else:  # docs only
-                source_instructions = """# SOURCE INSTRUCTIONS:
-- Use ONLY the provided local documents
-- If no document is relevant, respond with: not_found"""
-
-            prompt = f"""# INSTRUCTION: EVALUATE REQUIREMENT USING SPECIFIED SOURCES
-# ACTIVE SOURCES: {SOURCES.upper()}
-# PASS: FIRST PASS (QUICK SCAN)
-
-Requirement to evaluate:
-"{req_text}"
-
-{source_instructions}
-
-# RESPONSE REQUIREMENTS:
-- Base your response on the most relevant single source
-- Be specific about which part of the source supports your answer
-- Keep the entire response on a single line (no newlines)
-- Keep the reasoning concise (<= 40 words)
-- If the requirement is multi-part, clearly indicate which parts are addressed
-- If no source contains relevant information, respond with exactly: not_found
-
-# RESPONSE FORMAT (follow exactly):
-"[Compliant/Non-compliant/Partially Compliant] - [brief reasoning] (Reference: [Source identifier], [specific section if applicable])"
-
-# CRITICAL REMINDERS:
-- NEVER combine information from multiple sources
-- Choose the single best source for your response
-- If uncertain, respond with: not_found
-
-Allowed document names and URLs (you must cite exactly one of these when providing a reference):
-{allowed_doc_names_text}"""
-        else:
-            # Second pass - more thorough analysis
-            prompt = f"""# INSTRUCTION: RE-ANALYZE REQUIREMENT WITH DEEPER CONTEXT
-# ACTIVE SOURCES: {SOURCES.upper()}
-# PASS: SECOND PASS (DETAILED ANALYSIS)
-
-Requirement to evaluate (please analyze carefully):
-"{req_text}"
-
-# INSTRUCTIONS:
-1. Perform a DEEPER SEARCH through all available sources
-2. Pay special attention to:
-   - Specific sections or page numbers
-   - Related policies or procedures
-   - Implementation details
-3. If the requirement has multiple parts, address EACH part specifically
-4. Be as detailed and precise as possible
-
-# RESPONSE REQUIREMENTS:
-- Base your response on the most relevant single source
-- Be VERY specific about which part of the source supports your answer
-- Include section numbers, page numbers, or specific document locations
-- Keep the entire response on a single line (no newlines)
-- If the requirement is multi-part, clearly indicate which parts are addressed
-- If truly no source contains relevant information, respond with: not_found
-
-# RESPONSE FORMAT (follow exactly):
-"[Compliant/Non-compliant/Partially Compliant] - [detailed reasoning with specific references] (Reference: [Source identifier], [specific section/page])"
-
-# CRITICAL REMINDERS:
-- This is a SECOND PASS - your response should be more thorough than the first pass
-- If you found partial information in the first pass, look HARDER for more complete information
-- If still uncertain after thorough searching, respond with: not_found
-
-Allowed document names and URLs (you must cite exactly one of these when providing a reference):
-{allowed_doc_names_text}"""
-        return prompt
 
     def _worker_generate(req_text: str, first_pass: bool = True) -> Tuple[str, bool]:
         """Generate a response for a requirement with optional second pass.

@@ -3,8 +3,8 @@ name: Build and Release Binaries
 on:
   push:
     tags:
-      - "v*.*.*"
-  workflow_dispatch:
+      - "v*.*.*"    # run only on version tags
+  workflow_dispatch: # manual trigger
 
 jobs:
   build:
@@ -12,9 +12,10 @@ jobs:
     timeout-minutes: 60
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     env:
+      NUITKA_AUTO_DOWNLOAD: "yes"  # auto-accept helper downloads
       NUITKA_USE_DEPENDENCY_WALKER: "yes"
 
     steps:
@@ -32,17 +33,26 @@ jobs:
           pip install -r requirements.txt
           pip install nuitka zstandard
 
+      # --- Windows fix for Dependency Walker ---
+      - name: Install Dependency Walker (Windows only)
+        if: runner.os == 'Windows'
+        run: |
+          $dependsPath = "$env:LOCALAPPDATA\Nuitka\Nuitka\Cache\downloads\depends\x86_64"
+          mkdir -Force $dependsPath
+          curl -L -o depends.zip https://dependencywalker.com/depends22_x64.zip
+          tar -xf depends.zip -C $dependsPath
+
       - name: Build rfir-lm (CLI tool)
         run: |
-          python -m nuitka --onefile --show-progress --enable-plugin=tk-inter --include-package=config --include-data-files=config.json.sample=config.json.sample --output-dir=dist security_questionnaire_responder.py
+          echo "Building security_questionnaire_responder..."
+          python -m nuitka --onefile --enable-plugin=tk-inter --include-package=config --include-data-files=config.json.sample=config.json.sample --show-progress --verbose --output-dir=dist security_questionnaire_responder.py
           echo "security_questionnaire_responder build completed."
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.os }}
-          path: |
-            security_questionnaire_responder*
+          path: dist/security_questionnaire_responder*
 
   release:
     needs: build
@@ -68,6 +78,6 @@ jobs:
       - name: Upload binaries to release
         uses: softprops/action-gh-release@v1
         with:
-          files: ./artifacts/security_questionnaire_responder*
+          files: ./artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,15 @@
+# RESPONSE REQUIREMENTS:
+- Base your response on the most relevant single source
+- Be specific about which part of the source supports your answer
+- Keep the entire response on a single line (no newlines)
+- Keep the reasoning concise (<= 40 words)
+- If the requirement is multi-part, clearly indicate which parts are addressed
+- If no source contains relevant information, respond with exactly: not_found
+
+# RESPONSE FORMAT (follow exactly):
+"[Compliant/Non-compliant/Partially Compliant] - [brief reasoning] (Reference: [Source identifier], [specific section if applicable])"
+
+# CRITICAL REMINDERS:
+- NEVER combine information from multiple sources
+- Choose the single best source for your response
+- If uncertain, respond with: not_found
