@@ -34,7 +34,7 @@ jobs:
 
       - name: Build rfir-lm (CLI tool)
         run: |
-          python -m nuitka --onefile --enable-plugin=tk-inter --include-package=config --include-data-files=config.json.sample=config.json.sample --output-dir=dist security_questionnaire_responder.py
+          python -m nuitka --onefile --show-progress --enable-plugin=tk-inter --include-package=config --include-data-files=config.json.sample=config.json.sample --output-dir=dist security_questionnaire_responder.py
           echo "security_questionnaire_responder build completed."
 
       - name: Upload build artifacts
