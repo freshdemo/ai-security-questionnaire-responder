@@ -9,6 +9,7 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -40,6 +41,7 @@ jobs:
             --enable-plugin=tk-inter \
             --include-package=config \
             --include-data-files=config.json.sample=config.json.sample \
+            --show-progress
             --output-dir=dist \
             security_questionnaire_responder.py
           echo "security_questionnaire_responder build completed."
