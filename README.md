@@ -1,6 +1,4 @@
-README.md
-
-Request For Information Responder
+Security Questionnaire Responder
 
 This tool allows you to upload source of truth documents (security questionnairres, RFP's, RFI's, etc) to Google Gemini, read security requirements from a Google Sheet, use the LLM to compare requirements in the Sheet to what is in the documents, and provide responses in the Google Sheet.
 
