@@ -38,7 +38,8 @@ This tool allows you to upload source of truth documents (security questionnairr
        - Download relevant compliance documents. It's best to use the ISO27001, SIG Lite, and SOC2 report. Most of the other ones may generate undesireable responses.
        - Move them into a docs/ folder in this project.
 
-    7. RUN THE SCRIPT:
+    7. DOWNLOAD AND RUN THE SCRIPT:
+       - Get the latest version from the GitHub Releases 'https://github.com/freshdemo/ai-security-questionnaire-responder/releases'.
        - Allow the binary to be run on your Mac 'xattr -d com.apple.quarantine security_questionnaire_responder'. This is required as it's not signed by Apple.
        - Run the script with './security_questionnaire_responder' from the project folder.
        - You should see it uploading the documents to Gemini, and then starting to populate the spreadsheet.
